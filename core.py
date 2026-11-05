@@ -13,11 +13,6 @@ from datetime import datetime, timezone
 HERE = os.path.dirname(os.path.abspath(__file__))
 PREFS_FILE = os.path.join(os.path.expanduser("~"), ".screenplay_annotator.json")
 
-# --------------------------------------------------------------------------- schema
-# Default schema = the four tasks from the "Screenplay Annotation" slides.
-# Task keys:  id, name, short, description, labels[{value,hint,color}],
-#             per_character (list of {character,label,rationale}), multi (several labels),
-#             rationale ("required" | "optional").
 DEFAULT_SCHEMA = {
     "name": "screenplay-v0",
     "tasks": [
@@ -67,9 +62,7 @@ DEFAULT_SCHEMA = {
     ],
 }
 
-
-LINE_TYPES = ("dialogue", "description")   # "description" = scene sound / narration text, nothing to annotate
-
+LINE_TYPES = ("dialogue", "description")
 
 def load_schema(path=None):
     if not path:
@@ -78,9 +71,7 @@ def load_schema(path=None):
         s = json.load(f)
     return normalize_schema(s)
 
-
 def normalize_schema(s):
-    """Validate a reusable task template and fill the supported defaults."""
     if not isinstance(s, dict) or not isinstance(s.get("tasks"), list) or not s["tasks"]:
         raise ValueError("A task template must contain at least one task.")
     s = json.loads(json.dumps(s))
@@ -116,23 +107,18 @@ def normalize_schema(s):
             lab.setdefault("color", "#7f8794")
     return s
 
-
-# --------------------------------------------------------------------------- subtitles
 TIME_RE = re.compile(r"(?:(\d+):)?(\d+):(\d+)[.,](\d{1,3})")
-
 
 def _secs(m):
     h, mi, s, ms = m.groups()
     return int(h or 0) * 3600 + int(mi) * 60 + int(s) + int(ms.ljust(3, "0")) / 1000.0
 
-
 def _clean(text):
-    text = re.sub(r"<[^>]+>", "", text)           # <i>, <font ...>
-    text = re.sub(r"\{[^}]*\}", "", text)         # {\an8}, ASS overrides
+    text = re.sub(r"<[^>]+>", "", text)
+    text = re.sub(r"\{[^}]*\}", "", text)
     text = html.unescape(text)
     lines = [ln.strip() for ln in text.split("\n")]
     return "\n".join(ln for ln in lines if ln)
-
 
 def read_text(path, encoding=None):
     with open(path, "rb") as f:
@@ -141,13 +127,12 @@ def read_text(path, encoding=None):
         return raw.decode(encoding)
     if raw.startswith((b"\xff\xfe", b"\xfe\xff")):
         return raw.decode("utf-16")
-    for enc in ("utf-8-sig", "cp1256", "latin-1"):   # cp1256 = legacy Persian/Arabic files
+    for enc in ("utf-8-sig", "cp1256", "latin-1"):
         try:
             return raw.decode(enc)
         except UnicodeDecodeError:
             pass
     return raw.decode("utf-8", "replace")
-
 
 def parse_srt_vtt(text):
     text = text.replace("\r\n", "\n").replace("\r", "\n").lstrip("﻿")
@@ -162,7 +147,6 @@ def parse_srt_vtt(text):
                     cues.append((_secs(ma), _secs(mb), _clean("\n".join(lines[k + 1:]))))
                 break
     return cues
-
 
 def parse_ass(text):
     cues, fmt, in_events = [], None, False
@@ -184,7 +168,6 @@ def parse_ass(text):
                 cues.append((_secs(ma), _secs(mb), _clean(body)))
     return cues
 
-
 def parse_subtitles(path, encoding=None):
     text = read_text(path, encoding)
     ext = os.path.splitext(path)[1].lower()
@@ -196,9 +179,7 @@ def parse_subtitles(path, encoding=None):
     cues.sort(key=lambda c: (c[0], c[1]))
     return cues
 
-
 def align(primary, secondary):
-    """For each primary cue return the text of secondary cues that overlap it in time."""
     out = []
     for ps, pe, _ in primary:
         pd = max(pe - ps, 0.05)
@@ -212,25 +193,19 @@ def align(primary, secondary):
         out.append(" ".join(parts))
     return out
 
-
-# --------------------------------------------------------------------------- project
 def _expand(p):
     p = (p or "").strip().strip('"').strip("'")
     return os.path.abspath(os.path.expanduser(p)) if p else ""
 
-
 def _safe(name):
     return re.sub(r"[^\w\-.]+", "_", name, flags=re.UNICODE).strip("._") or "annotator"
 
-
 def _schema_core(schema):
-    """Schema without the flags that can be widened later (multi, speaker_flag) - used to accept old files."""
     s = json.loads(json.dumps(schema))
     for t in s.get("tasks", []):
         t.pop("multi", None)
         t.pop("speaker_flag", None)
     return s
-
 
 class Project:
     def __init__(self, cfg):
@@ -270,7 +245,6 @@ class Project:
         self.items, self.warnings = {}, []
         self._load()
 
-    # --- persistence
     def _load(self):
         if not os.path.isfile(self.path):
             return
@@ -289,9 +263,17 @@ class Project:
                 continue
             if v.get("uid") != uids[i]:
                 stale += 1
+                
+            tasks_data = v.get("tasks", {})
+            sentences_data = v.get("sentences", {})
+            if tasks_data and not sentences_data:
+                sentences_data = {"0": self._upgrade_tasks(tasks_data)}
+            else:
+                sentences_data = {sk: self._upgrade_tasks(sv) for sk, sv in sentences_data.items()}
+
             self.items[i] = {
                 "uid": uids[i],
-                "tasks": self._upgrade_tasks(v.get("tasks", {})),
+                "sentences": sentences_data,
                 "line_type": v.get("line_type") if v.get("line_type") in LINE_TYPES else "dialogue",
                 "last_edited_by": v.get("last_edited_by", ""),
                 "last_edited_at": v.get("last_edited_at", "")
@@ -301,7 +283,6 @@ class Project:
                                  "(different file or edited text) - please review them." % stale)
 
     def _upgrade_tasks(self, tasks):
-        """Old files stored one label as a string; multi-label tasks now store a list."""
         by_id = {t["id"]: t for t in self.schema["tasks"]}
         out = {}
         for tid, val in (tasks or {}).items():
@@ -327,7 +308,6 @@ class Project:
             json.dump(data, f, ensure_ascii=False, indent=1)
         os.replace(tmp, self.path)
 
-    # --- validation + update
     def validate(self, tasks):
         out = {}
         by_id = {t["id"]: t for t in self.schema["tasks"]}
@@ -365,7 +345,7 @@ class Project:
                     out[tid] = r
         return out
 
-    def set_annotation(self, line_id, tasks, line_type="dialogue", edited_by=None, write=True):
+    def set_annotation(self, line_id, sentence_idx, tasks, line_type="dialogue", edited_by=None, write=True):
         with self.lock:
             if not 1 <= line_id <= len(self.lines):
                 raise ValueError("bad line id")
@@ -374,7 +354,9 @@ class Project:
                 raise ValueError("unknown line type: %s" % line_type)
             clean = self.validate(tasks)
             previous = self.items.get(line_id, {})
-            old_tasks = previous.get("tasks", {})
+            
+            old_sentences = previous.get("sentences", {})
+            old_tasks = old_sentences.get(str(sentence_idx), {})
             old_type = previous.get("line_type", "dialogue")
 
             if old_tasks != clean or old_type != line_type:
@@ -385,11 +367,17 @@ class Project:
             else:
                 last_edited_by = previous.get("last_edited_by", "")
                 last_edited_at = previous.get("last_edited_at", "")
+                
+            new_sentences = dict(old_sentences)
+            if clean:
+                new_sentences[str(sentence_idx)] = clean
+            else:
+                new_sentences.pop(str(sentence_idx), None)
 
-            if clean or last_edited_at or line_type != "dialogue":
+            if new_sentences or last_edited_at or line_type != "dialogue":
                 self.items[line_id] = {
                     "uid": self.lines[line_id - 1]["uid"],
-                    "tasks": clean,
+                    "sentences": new_sentences,
                     "line_type": line_type,
                     "last_edited_by": last_edited_by,
                     "last_edited_at": last_edited_at,
@@ -400,11 +388,7 @@ class Project:
             if write:
                 self._write()
 
-    # --- pre-annotation import (e.g. a first pass made by an AI from the same subtitle file)
     def import_preannotations(self, records, edited_by="AI pre-annotation", overwrite=False):
-        """Merge records [{"start" | "id", "line_type", "annotations": {...}}] into this project.
-        Lines are matched by start time (id only breaks ties / is the fallback). Lines that already have
-        annotations or a line type are kept unless overwrite=True. Returns a summary dict."""
         res = {"imported": 0, "skipped_existing": 0, "empty": 0, "unmatched": [], "errors": []}
         with self.lock:
             for rec in records:
@@ -432,16 +416,17 @@ class Project:
                     continue
                 lid = line["id"]
                 ltype = rec.get("line_type") or "dialogue"
-                tasks = {} if ltype == "description" else (rec.get("annotations") or {})
-                if ltype == "dialogue" and not tasks:
+                sentences = {} if ltype == "description" else (rec.get("sentences") or {"0": rec.get("annotations", {})})
+                if ltype == "dialogue" and not sentences:
                     res["empty"] += 1
                     continue
                 prev = self.items.get(lid)
-                if prev and (prev.get("tasks") or prev.get("line_type") == "description") and not overwrite:
+                if prev and (prev.get("sentences") or prev.get("line_type") == "description") and not overwrite:
                     res["skipped_existing"] += 1
                     continue
                 try:
-                    self.set_annotation(lid, tasks, ltype, edited_by=edited_by, write=False)
+                    for s_idx, tasks in sentences.items():
+                        self.set_annotation(lid, int(s_idx), tasks, ltype, edited_by=edited_by, write=False)
                     res["imported"] += 1
                 except ValueError as e:
                     res["errors"].append("line %d: %s" % (lid, e))
@@ -449,7 +434,6 @@ class Project:
                 self._write()
         return res
 
-    # --- export
     def records(self, include_all=False):
         c, l1, l2 = self.cfg, self.cfg["lang1"], self.cfg["lang2"]
         for ln in self.lines:
@@ -463,8 +447,7 @@ class Project:
             rec["annotator"] = c["annotator"]
             rec["movie"] = os.path.basename(c["movie"]) if c["movie"] else ""
             rec["line_type"] = it.get("line_type", "dialogue") if it else "dialogue"
-            # description lines need no annotation, so any old task values are not exported
-            rec["annotations"] = it["tasks"] if it and rec["line_type"] == "dialogue" else {}
+            rec["sentences"] = it["sentences"] if it and rec["line_type"] == "dialogue" else {}
             yield rec
 
     def export(self, fmt, include_all=False):
@@ -476,34 +459,37 @@ class Project:
         if fmt == "csv":
             buf = io.StringIO()
             base = ["id", "start", "end", "text_" + self.cfg["lang1"]] + \
-                   (["text_" + self.cfg["lang2"]] if self.cfg["subs2"] else []) + ["annotator", "line_type"]
+                   (["text_" + self.cfg["lang2"]] if self.cfg["subs2"] else []) + ["annotator", "line_type", "sentence_idx"]
             cols = base + [x for t in self.schema["tasks"] for x in (t["id"] + "_label", t["id"] + "_rationale")]
             w = csv.DictWriter(buf, cols, extrasaction="ignore")
             w.writeheader()
             for r in recs:
-                row = {k: r.get(k, "") for k in base}
-                for t in self.schema["tasks"]:
-                    v = r["annotations"].get(t["id"])
-                    if v is None:
-                        continue
-                    if t["per_character"]:
-                        def labs(x):
-                            return "/".join(x["label"]) if isinstance(x["label"], list) else x["label"]
-                        row[t["id"] + "_label"] = "; ".join(
-                            "%s%s=%s" % (x["character"], " [speaker]" if x.get("is_speaker") else "", labs(x)) for x in v)
-                        row[t["id"] + "_rationale"] = " | ".join(x["rationale"] for x in v)
-                    else:
-                        lab = v["label"]
-                        row[t["id"] + "_label"] = "; ".join(lab) if isinstance(lab, list) else lab
-                        row[t["id"] + "_rationale"] = v["rationale"]
-                w.writerow(row)
-            return "﻿" + buf.getvalue(), "text/csv"       # BOM so Excel reads Persian
+                sentences = r.get("sentences", {"0": {}})
+                if not sentences and r["line_type"] == "dialogue":
+                    sentences = {"0": {}}
+                for sent_idx, tasks in sentences.items():
+                    row = {k: r.get(k, "") for k in base}
+                    row["sentence_idx"] = sent_idx
+                    for t in self.schema["tasks"]:
+                        v = tasks.get(t["id"])
+                        if v is None:
+                            continue
+                        if t["per_character"]:
+                            def labs(x):
+                                return "/".join(x["label"]) if isinstance(x["label"], list) else x["label"]
+                            row[t["id"] + "_label"] = "; ".join(
+                                "%s%s=%s" % (x["character"], " [speaker]" if x.get("is_speaker") else "", labs(x)) for x in v)
+                            row[t["id"] + "_rationale"] = " | ".join(x["rationale"] for x in v)
+                        else:
+                            lab = v["label"]
+                            row[t["id"] + "_label"] = "; ".join(lab) if isinstance(lab, list) else lab
+                            row[t["id"] + "_rationale"] = v["rationale"]
+                    w.writerow(row)
+            return "﻿" + buf.getvalue(), "text/csv"
         raise ValueError("unknown format")
 
 
-# --------------------------------------------------------------------------- entry state helpers
 def entry_state(task, e):
-    """'empty' | 'ok' | 'incomplete' for one task's stored value (dict, or list of rows if per_character)."""
     if not e:
         return "empty"
     rows = e if task["per_character"] else [e]
@@ -519,26 +505,26 @@ def entry_state(task, e):
             return "incomplete"
     return "ok"
 
-
 def is_description(project, line_id):
     return (project.items.get(line_id) or {}).get("line_type") == "description"
 
-
 def line_state(project, line_id):
-    """(annotated?, incomplete?) for a line. A description line counts as done."""
     if is_description(project, line_id):
         return True, False
-    tasks = (project.items.get(line_id) or {}).get("tasks", {})
+    sentences = (project.items.get(line_id) or {}).get("sentences", {})
     any_, inc = False, False
-    for t in project.schema["tasks"]:
-        s = entry_state(t, tasks.get(t["id"]))
-        any_ |= s != "empty"
-        inc |= s == "incomplete"
+    if not sentences:
+        return False, False
+    for tasks in sentences.values():
+        for t in project.schema["tasks"]:
+            s = entry_state(t, tasks.get(t["id"]))
+            if s != "empty":
+                any_ = True
+            if s == "incomplete":
+                inc = True
     return any_, inc
 
-
 def parse_preannotation_text(text):
-    """Accept a JSON list, {"lines"|"annotations"|"items": [...]}, or JSONL; tolerate ```json fences."""
     text = text.strip().lstrip("\ufeff")
     text = re.sub(r"^```[a-zA-Z]*\s*|\s*```$", "", text).strip()
     try:
@@ -548,7 +534,7 @@ def parse_preannotation_text(text):
         for ln in text.splitlines():
             ln = ln.strip().rstrip(",")
             if ln:
-                data.append(json.loads(ln))        # raises ValueError with a useful position
+                data.append(json.loads(ln))
     if isinstance(data, dict):
         for k in ("lines", "annotations", "items", "records"):
             if isinstance(data.get(k), list):
@@ -558,15 +544,12 @@ def parse_preannotation_text(text):
         raise ValueError("Expected a list of line records.")
     return data
 
-
-# --------------------------------------------------------------------------- preferences
 def load_prefs():
     try:
         with open(PREFS_FILE, encoding="utf-8") as f:
             return json.load(f)
     except Exception:
         return {}
-
 
 def save_prefs(cfg):
     try:
